@@ -43,7 +43,15 @@ jobs:
           if ! command -v shellcheck >/dev/null 2>&1; then
             sudo apt-get update && sudo apt-get install -y shellcheck
           fi
-          shellcheck --severity=warning scripts/*.sh scripts/hooks/*
+          targets=()
+          for f in scripts/*.sh scripts/hooks/*; do
+            if [ -f "$f" ]; then
+              targets+=("$f")
+            fi
+          done
+          if [ "${#targets[@]}" -gt 0 ]; then
+            shellcheck --severity=warning "${targets[@]}"
+          fi
 
       - name: 抑制指定のスキャン (コメント規約)
         if: github.event_name == 'push' || github.event_name == 'pull_request'
