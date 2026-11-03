@@ -23,3 +23,7 @@
 - `docs/project-record.md`: このプロジェクトの正本記録（検証結果もここに残す）
 
 検証の進捗と結果は `docs/project-record.md` に記録する。このリポジトリには、個人を特定できる情報を一切置かない。
+
+## PR 経由の統合の実走
+
+2026-11-03、形態Pの検証の一環としてこの節を PR 経由で追加した。文脈のないレビュー記録、必須チェック（checks／environment／taint）の通過、auto-merge の実挙動を通しで確認するための変更である。結果は `docs/project-record.md` に記録する。
