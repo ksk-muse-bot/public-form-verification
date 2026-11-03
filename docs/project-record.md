@@ -33,7 +33,7 @@
 - `.github/workflows/checks.yml`: 雛形相当の検査（ジョブ checks／environment／taint）
 - `.github/dependabot.yml`: github-actions と pip の更新
 - `verification_sample.py`: CodeQL／Pysa の解析対象
-- `scripts/`: 雛形の土台スクリプト（抑制スキャン、行数チェック、フック、環境セットアップ）
+- `scripts/`: 雛形の土台スクリプト（抑制スキャン、行数チェック）。フック類と環境セットアップは入れていない（決定履歴の5件目）
 - `.pyre_configuration`、`.pysa-models/`: taint ジョブ（Pysa）の設定
 
 配置ルール:
@@ -56,6 +56,7 @@
 | 2026-11-03 | コミットの author／committer は noreply 形式（ID 付き）で明示指定する | gh_api.py 経由のコミットは、著者を指定しないとアカウント登録メール（plus-alias 形式）が既定になることを既存リポジトリの履歴で実測した。Git Data API は著者の明示指定を受け付ける | なし |
 | 2026-11-03 | release ワークフローは入れない | main へ直接 push する release の流れは、PR を必須とするブランチ保護と競合する。検証範囲を形態Pの部品に絞るため除外した（release と保護の共存の検証は、必要になった時点で別途扱う） | なし |
 | 2026-11-03 | 公開はこのリポジトリに限る（ユーザー決定済みの範囲） | muse-template の公開見送りに伴う代替検証であり、他のリポジトリの公開可否は個別判断のまま | なし |
+| 2026-11-03 | フック類（scripts/hooks/、install-hooks.sh）と scripts/setup-env.sh は入れない | 雛形の既存分に含まれる shellcheck 抑制指定2件（setup-env.sh の SC1091、hooks/pre-commit の SC2086）は、雛形側では既存分として管理されているが、このリポジトリの初回差分ではコメント規約スキャン（check-suppressions.sh）が新規の違反として検出し、checks が failure になった（run 41612663705 で実測）。検証に不要なファイルであり、新規リポジトリの履歴へ抑制指定を持ち込まないため除外した | なし |
 
 ## 実装状況
 
@@ -72,6 +73,7 @@
 ## 進捗
 
 - 2026-11-03: リポジトリを作成し、土台を初回コミットとして投入した。著者メタデータが noreply 形式であることを実物で確認済み。
+- 2026-11-03: 初回の checks でコメント規約スキャンが雛形既存分の抑制指定2件を検出して failure になったため、フック類と setup-env.sh を除外した（決定履歴の5件目）。あわせて、混入した `__pycache__` の .pyc 2件も除去した。
 
 ## 課題・問題
 
