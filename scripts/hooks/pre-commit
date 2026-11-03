@@ -1,0 +1,138 @@
+#!/bin/sh
+# pre-commit フック: コミット前の高速チェックと秘密情報スキャン
+#
+# このファイルは実行可能であることが前提のスクリプトです。
+# リポジトリ上では実行ビットが付かないことがあるため、導入時に
+#   sh scripts/install-hooks.sh
+# を実行すると .git/hooks/ へコピーされ、実行可能になります。
+#
+# 検査の内訳:
+#   1. 設定ファイルがある場合だけ、フォーマッター / リンターの高速チェック
+#      （未設定・未インストールの道具は警告だけ出して静かに飛ばす）
+#   2. gitleaks によるステージ済み変更の秘密情報スキャン
+#      gitleaks が無い環境では、大きな警告を出して「失敗」させる。
+#      秘密情報の混入防止は多層防御であり（.gitignore、本フック、CI）、
+#      CI は最後の砦だが、手元で検出できなかった事実を黙って通さない。
+
+set -u
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    echo "pre-commit: git リポジトリのルートが分かりません。中止します。" >&2
+    exit 1
+}
+cd "$repo_root" || exit 1
+
+fail=0
+
+note() { echo "pre-commit: $*" >&2; }
+
+# --- 1. 高速チェック（設定がある場合だけ） ---
+
+# Python: ruff（pyproject.toml や .ruff.toml 等で設定されている場合）
+if [ -f pyproject.toml ] || [ -f ruff.toml ] || [ -f .ruff.toml ]; then
+    if command -v ruff >/dev/null 2>&1; then
+        note "ruff を実行します"
+        ruff check . || fail=1
+        ruff format --check . || fail=1
+    else
+        note "警告: ruff の設定はありますが ruff が未インストールのため、検査を省略します"
+    fi
+fi
+
+# Node: package.json に lint / format スクリプトがある場合
+if [ -f package.json ]; then
+    if command -v npm >/dev/null 2>&1; then
+        if grep -q '"lint"[[:space:]]*:' package.json; then
+            note "npm run lint を実行します"
+            npm run lint || fail=1
+        fi
+        if grep -q '"format:check"[[:space:]]*:' package.json; then
+            note "npm run format:check を実行します"
+            npm run format:check || fail=1
+        fi
+    else
+        note "警告: package.json はありますが npm が未インストールのため、Node の検査を省略します"
+    fi
+fi
+
+# Prettier: 設定がある場合（prettier.config.js / .prettierrc / package.json の prettier キー）
+prettier_configured=0
+if [ -f prettier.config.js ] || [ -f .prettierrc ]; then
+    prettier_configured=1
+elif [ -f package.json ] && grep -q '"prettier"[[:space:]]*:' package.json; then
+    prettier_configured=1
+fi
+if [ "$prettier_configured" -eq 1 ]; then
+    if command -v npx >/dev/null 2>&1 && [ -x node_modules/.bin/prettier ]; then
+        staged_web=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(js|jsx|ts|tsx|mts|cts|json)$' || true)
+        if [ -n "$staged_web" ]; then
+            note "prettier --check を実行します（ステージ済みファイル）"
+            # ファイル名の空白分割は意図的（対象はステージ済みの対象ファイルのみ）
+            # shellcheck disable=SC2086
+            npx prettier --check $staged_web || fail=1
+        fi
+    else
+        note "警告: Prettier の設定はありますが npx またはローカルの prettier が使えないため、検査を省略します"
+    fi
+fi
+
+# Go: go.mod がある場合
+if [ -f go.mod ]; then
+    if command -v go >/dev/null 2>&1; then
+        note "gofmt と go vet を実行します"
+        if [ -n "$(gofmt -l .)" ]; then
+            note "エラー: gofmt で整形されていないファイルがあります"
+            fail=1
+        fi
+        go vet ./... || fail=1
+    else
+        note "警告: go.mod はありますが go が未インストールのため、検査を省略します"
+    fi
+fi
+
+# Rust: Cargo.toml がある場合
+if [ -f Cargo.toml ]; then
+    if command -v cargo >/dev/null 2>&1; then
+        note "cargo fmt --check を実行します"
+        cargo fmt --check || fail=1
+    else
+        note "警告: Cargo.toml はありますが cargo が未インストールのため、検査を省略します"
+    fi
+fi
+
+# --- 2. 秘密情報スキャン（必須） ---
+
+if command -v gitleaks >/dev/null 2>&1; then
+    note "gitleaks でステージ済みの変更をスキャンします"
+    # gitleaks v8 のコマンド。新しい版では `gitleaks git --staged` に読み替える
+    if ! gitleaks protect --staged --redact; then
+        note "エラー: 秘密情報らしき内容が検出されました。コミットを中止します"
+        fail=1
+    fi
+else
+    cat >&2 <<'EOF'
+
+================================================================
+pre-commit: エラー: gitleaks がインストールされていません
+================================================================
+秘密情報のスキャンを実行できないため、コミットを中止します。
+黙って通すことはしません。秘密情報の混入防止は多層で行い
+（.gitignore、本フック、CI の再スキャン）、CI は最後の砦ですが、
+手元での検出が第一の層です。
+
+導入方法（いずれか）:
+  - https://github.com/gitleaks/gitleaks のリリースから取得
+  - macOS: brew install gitleaks
+  - Go がある環境: go install github.com/gitleaks/gitleaks/v8@latest
+================================================================
+
+EOF
+    fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+    note "検査に失敗しました。指摘を直してから再度コミットしてください"
+    exit 1
+fi
+
+exit 0

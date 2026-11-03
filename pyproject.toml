@@ -1,0 +1,8 @@
+# Python の標準ツール設定（ruff）。
+# 依存の宣言は requirements.txt、版の固定は .python-version で行う。
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "S", "UP"]

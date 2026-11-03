@@ -1,0 +1,41 @@
+# Dependabot の設定
+
+# このリポジトリ自体は GitHub Actions の更新だけを対象にする。
+# 言語ごとの依存（pip や npm など）は、このファイルを土台に、
+# プロジェクト側のリポジトリで package-ecosystem を追加して使う。
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+
+# 言語ごとの依存は、プロジェクトの契約に合わせて以下を有効化する（例）。
+# 週次監査は、契約（.python-version / package.json / go.mod / Cargo.toml）と
+# ここに有効なエコシステムが揃っているかを照合する。
+#
+#   - package-ecosystem: "pip"
+#     directory: "/"
+#     schedule:
+#       interval: "weekly"
+#   - package-ecosystem: "npm"
+#     directory: "/"
+#     schedule:
+#       interval: "weekly"
+#   - package-ecosystem: "gomod"
+#     directory: "/"
+#     schedule:
+#       interval: "weekly"
+#   - package-ecosystem: "cargo"
+#     directory: "/"
+#     schedule:
+#       interval: "weekly"

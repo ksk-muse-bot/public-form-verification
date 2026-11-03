@@ -1,0 +1,190 @@
+# 検査ワークフロー
+# push と pull_request で走り、手元のフックと同じ検査をクリーンな環境で再実行する最終関門。
+# environment ジョブは、リポジトリにある環境の契約を検出し、該当する言語の
+# 環境をゼロから再現して基本チェックまで行う。契約のない言語は自動で飛ばす。
+
+name: checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # gitleaks が履歴全体を走査できるよう、全履歴を取得する
+          fetch-depth: 0
+
+      - name: 秘密情報スキャン (gitleaks)
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: ワークフローの検査 (actionlint)
+        if: hashFiles('.github/workflows/*.yml', '.github/workflows/*.yaml') != ''
+        run: |
+          curl -sSL -o /tmp/actionlint.tar.gz https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          /tmp/actionlint
+
+      - name: シェルスクリプトの検査 (shellcheck)
+        if: hashFiles('scripts/*.sh', 'scripts/hooks/*') != ''
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y shellcheck
+          fi
+          shellcheck --severity=warning scripts/*.sh scripts/hooks/*
+
+      - name: 抑制指定のスキャン (コメント規約)
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            range="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+            sh scripts/check-suppressions.sh "$range"
+          elif [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            echo "初回プッシュ（生成直後）のため、抑制指定スキャンは省略します"
+          else
+            git fetch --no-tags origin "${{ github.event.before }}" || echo "before の取得に失敗しました。範囲が使えない場合は抑制指定スキャンが明示エラーで終了します"
+            range="${{ github.event.before }}..${{ github.sha }}"
+            sh scripts/check-suppressions.sh "$range"
+          fi
+
+      - name: 行数チェック
+        run: python3 scripts/check_line_counts.py
+
+      - name: 静的セキュリティ検査 (semgrep)
+        env:
+          SEMGREP_SEND_METRICS: "off"
+        run: |
+          python3 -m venv /tmp/semgrep-venv
+          /tmp/semgrep-venv/bin/pip install semgrep==1.182.1
+          /tmp/semgrep-venv/bin/semgrep scan --config p/ci --error --quiet
+
+  environment:
+    runs-on: ubuntu-latest
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: 環境の契約の検出
+        id: detect
+        run: |
+          {
+            echo "python=$([ -f .python-version ] && echo true || echo false)"
+            echo "node=$([ -f package.json ] && echo true || echo false)"
+            echo "go=$([ -f go.mod ] && echo true || echo false)"
+            echo "rust=$([ -f Cargo.toml ] && echo true || echo false)"
+            if [ -f .nvmrc ]; then
+              echo "node_file=.nvmrc"
+            else
+              echo "node_file=package.json"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Python のセットアップ
+        if: steps.detect.outputs.python == 'true'
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: .python-version
+
+      - name: Python 環境の再現・構文確認・テスト
+        if: steps.detect.outputs.python == 'true'
+        run: |
+          python -m venv .venv
+          if [ -f requirements.txt ] && grep -qvE '^\s*(#|$)' requirements.txt; then .venv/bin/pip install -r requirements.txt; fi
+          find . -name '*.py' -not -path './.venv/*' -print0 | xargs -0 .venv/bin/python -m py_compile
+          if find . \( -name 'test_*.py' -o -name '*_test.py' \) -not -path './.venv/*' | grep -q .; then
+            .venv/bin/pip install pytest
+            .venv/bin/python -m pytest -q
+          fi
+
+      - name: Node のセットアップ
+        if: steps.detect.outputs.node == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: ${{ steps.detect.outputs.node_file }}
+          package-manager-cache: false
+
+      - name: Node 環境の再現と基本チェック
+        if: steps.detect.outputs.node == 'true'
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          elif [ -f pnpm-lock.yaml ]; then
+            corepack enable pnpm
+            pnpm install --frozen-lockfile
+          elif [ -f yarn.lock ]; then
+            yarn install --frozen-lockfile
+          else
+            echo "lockfile がありません。依存の固定が前提です" >&2
+            exit 1
+          fi
+          npm run lint --if-present
+          npm run test --if-present
+
+      - name: Go のセットアップ
+        if: steps.detect.outputs.go == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Go のビルド・vet・テスト
+        if: steps.detect.outputs.go == 'true'
+        run: |
+          go build ./...
+          go vet ./...
+          go test ./...
+
+      - name: Rust の確認
+        if: steps.detect.outputs.rust == 'true'
+        run: |
+          cargo fmt --check
+          cargo test
+
+  taint:
+    # データフロー解析（Pysa / pyre-check）。Python の手続き間・ファイル間の
+    # 汚染追跡を行い、CodeQL（非公開リポジトリでは無料範囲外）のデータフロー層を担う。
+    # Python ファイルが無いリポジトリでは解析を飛ばす。
+    runs-on: ubuntu-latest
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Python ファイルの検出
+        id: detect
+        run: |
+          if find . -name '*.py' -not -path './.venv/*' | grep -q .; then
+            echo "python=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "python=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Python のセットアップ
+        if: steps.detect.outputs.python == 'true'
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: データフロー解析 (Pysa)
+        if: steps.detect.outputs.python == 'true'
+        run: |
+          python3 -m venv /tmp/pysa-venv
+          /tmp/pysa-venv/bin/pip install pyre-check==0.10.0 pyrefly==1.4.0
+          TAINT_DIR=$(find /tmp/pysa-venv -type d -name taint -path '*pyre_check*' | head -1)
+          PATH="/tmp/pysa-venv/bin:$PATH" /tmp/pysa-venv/bin/pyre --noninteractive analyze --no-verify \
+            --taint-models-path .pysa-models \
+            --taint-models-path "$TAINT_DIR/common" \
+            --taint-models-path "$TAINT_DIR/core_privacy_security" \
+            --save-results-to /tmp/pysa-results
+          # pyre analyze は検出時も終了コード 0 のため、合否は errors.json の件数で判定する
+          python3 -c 'import json,sys; issues=json.load(open("/tmp/pysa-results/errors.json")); [print(e) for e in issues]; sys.exit(1 if issues else 0)'

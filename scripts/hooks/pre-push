@@ -1,0 +1,117 @@
+#!/bin/sh
+# pre-push フック: プッシュ前のテストと秘密情報スキャン
+#
+# このファイルは実行可能であることが前提のスクリプトです。
+# リポジトリ上では実行ビットが付かないことがあるため、導入時に
+#   sh scripts/install-hooks.sh
+# を実行すると .git/hooks/ へコピーされ、実行可能になります。
+#
+# 検査の内訳:
+#   1. テスト（設定がある場合だけ。未設定の環境では警告して飛ばす）
+#   2. gitleaks による秘密情報スキャン（履歴全体）
+#      gitleaks が無い環境では、大きな警告を出して「失敗」させる。
+#      秘密情報の混入防止は多層防御であり（.gitignore、フック、CI）、
+#      CI は最後の砦だが、手元で検出できなかった事実を黙って通さない。
+
+set -u
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    echo "pre-push: git リポジトリのルートが分かりません。中止します。" >&2
+    exit 1
+}
+cd "$repo_root" || exit 1
+
+fail=0
+
+note() { echo "pre-push: $*" >&2; }
+
+# --- 1. テスト（設定がある場合だけ） ---
+
+ran_tests=0
+
+# Python: pytest が使えて、テストの置き場所か設定がある場合
+if command -v pytest >/dev/null 2>&1; then
+    if [ -d tests ] || [ -f pyproject.toml ] || [ -f pytest.ini ] || [ -f setup.cfg ]; then
+        note "pytest を実行します"
+        pytest -q || fail=1
+        ran_tests=1
+    fi
+fi
+
+# Node: package.json に test スクリプトがある場合
+if [ -f package.json ] && command -v npm >/dev/null 2>&1; then
+    if grep -q '"test"[[:space:]]*:' package.json; then
+        note "npm test を実行します"
+        npm test || fail=1
+        ran_tests=1
+    fi
+fi
+
+# Go: go.mod がある場合
+if [ -f go.mod ] && command -v go >/dev/null 2>&1; then
+    note "go test を実行します"
+    go test ./... || fail=1
+    ran_tests=1
+fi
+
+# Rust: Cargo.toml がある場合
+if [ -f Cargo.toml ] && command -v cargo >/dev/null 2>&1; then
+    note "cargo test を実行します"
+    cargo test || fail=1
+    ran_tests=1
+fi
+
+if [ "$ran_tests" -eq 0 ]; then
+    note "注記: 実行可能なテスト設定が見つからないため、テストは省略します"
+fi
+
+# --- 2. 秘密情報スキャン（必須） ---
+
+if command -v gitleaks >/dev/null 2>&1; then
+    note "gitleaks で履歴全体をスキャンします"
+    # 履歴全体の走査は、現行 gitleaks では `git` サブコマンドで行う。
+    # 旧称の `protect`（--staged なし）は作業差分だけが対象で履歴を
+    # 走査しないため、ここでは使わない（2026-10-29 に実測で確認し是正）。
+    # `git` が無い旧版では同じく履歴全体を走査する `detect` に読み替える。
+    if gitleaks git --help >/dev/null 2>&1; then
+        scan_cmd="git"
+    else
+        scan_cmd="detect"
+    fi
+    gitleaks "$scan_cmd" --redact
+    scan_rc=$?
+    if [ "$scan_rc" -eq 1 ]; then
+        note "エラー: 秘密情報らしき内容が検出されました。プッシュを中止します"
+        fail=1
+    elif [ "$scan_rc" -ne 0 ]; then
+        # 検出ではなくスキャン自体の失敗。文面を取り違えない（R3-3）
+        note "エラー: 秘密情報スキャン自体が失敗しました（終了コード ${scan_rc}）。プッシュを中止します"
+        fail=1
+    fi
+else
+    cat >&2 <<'EOF'
+
+================================================================
+pre-push: エラー: gitleaks がインストールされていません
+================================================================
+秘密情報のスキャンを実行できないため、プッシュを中止します。
+黙って通すことはしません。秘密情報の混入防止は多層で行い
+（.gitignore、フック、CI の再スキャン）、CI は最後の砦ですが、
+手元での検出が第一の層です。
+
+導入方法（いずれか）:
+  - https://github.com/gitleaks/gitleaks のリリースから取得
+  - macOS: brew install gitleaks
+  - Go がある環境: go install github.com/gitleaks/gitleaks/v8@latest
+================================================================
+
+EOF
+    fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+    note "検査に失敗しました。指摘を直してから再度プッシュしてください"
+    exit 1
+fi
+
+exit 0

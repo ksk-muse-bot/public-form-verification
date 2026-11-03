@@ -1,0 +1,8 @@
+# CLI スクリプト向けの追加の汚染源モデル（Pysa 出荷モデルに無いもの）
+sys.argv: TaintSource[CLIUserControlled]
+
+os.environ: TaintSource[UserControlled]
+
+def os.getenv() -> TaintSource[UserControlled]: ...
+
+def builtins.input() -> TaintSource[UserControlled]: ...
